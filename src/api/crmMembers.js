@@ -1,31 +1,24 @@
 /**
  * SC CRM Member Registration — API Client
  *
- * Primary endpoint: POST /api/crm/members  (ยังไม่ได้ implement ใน backend)
- * Fallback target:  POST /api/members      (มีอยู่แล้วใน loyalty.js)
- *
- * เปลี่ยน endpoint ได้ที่ MEMBER_ENDPOINT ด้านล่าง
+ * Uses the existing server-side staff-device authorization for CRM routes.
  */
 
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
-const STAFF_TOKEN = import.meta.env.VITE_STAFF_TOKEN || '';
-const POS_API_KEY = import.meta.env.VITE_POS_API_KEY || '';
+import { BASE_URL } from './apiConfig.js';
+import { staffSession, StaffSessionRequiredError } from './staffSession.js';
 
 const MEMBER_ENDPOINT = '/api/crm/members';
 const CONSENT_VERSION = 'v1.0';
 
-function authHeaders() {
-  const h = { 'Content-Type': 'application/json' };
-  if (STAFF_TOKEN) h['Authorization'] = `Bearer ${STAFF_TOKEN}`;
-  if (POS_API_KEY) h['x-pos-api-key'] = POS_API_KEY;
-  return h;
+function authHeaders(session) {
+  return { 'Content-Type': 'application/json', Authorization: `Bearer ${session.requireToken()}` };
 }
 
 async function parseError(res) {
   let msg = `HTTP ${res.status}`;
   try {
     const body = await res.json();
-    msg = body.error || body.message || msg;
+    msg = String(body.error || body.message || msg);
   } catch (_) { /* ignore */ }
   return msg;
 }
@@ -35,7 +28,8 @@ async function parseError(res) {
  * Returns the raw response body from the backend.
  * Throws with a Thai-language message on failure.
  */
-export async function registerMember(form) {
+export async function registerMember(form, { fetchImpl = globalThis.fetch, session = staffSession } = {}) {
+  const headers = authHeaders(session);
   const name = [form.firstName.trim(), form.lastName.trim()].filter(Boolean).join(' ');
 
   const payload = {
@@ -54,19 +48,17 @@ export async function registerMember(form) {
     consent_version: CONSENT_VERSION,
   };
 
-  if (import.meta.env.DEV) {
-    // Log payload in dev mode only — never logs PID or health data directly
-    const safe = { ...payload };
-    console.log('[SCCRMV2] registerMember →', safe);
-  }
-
-  const res = await fetch(`${BASE_URL}${MEMBER_ENDPOINT}`, {
+  const res = await fetchImpl(`${BASE_URL}${MEMBER_ENDPOINT}`, {
     method: 'POST',
-    headers: authHeaders(),
+    headers,
     body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
+    if (res.status === 401) {
+      session.clear();
+      throw new StaffSessionRequiredError();
+    }
     const raw = await parseError(res);
     throw new Error(mapApiError(res.status, raw));
   }
@@ -77,19 +69,16 @@ export async function registerMember(form) {
   const memberId = data?.data?.id ?? data?.id;
   if (form.consentPdpaHealth && memberId && hasHealthData(form)) {
     try {
-      await saveHealthRecord(memberId, form);
-    } catch (err) {
+      await saveHealthRecord(memberId, form, { fetchImpl, session });
+    } catch {
       // Non-fatal: health record endpoint may not exist yet
-      if (import.meta.env.DEV) {
-        console.warn('[SCCRMV2] health record save failed (non-fatal):', err.message);
-      }
     }
   }
 
   return data;
 }
 
-async function saveHealthRecord(memberId, form) {
+async function saveHealthRecord(memberId, form, { fetchImpl, session }) {
   const payload = {
     ...(form.pidType   && { pidDocumentType: form.pidType }),
     ...(form.pidNumber && { pidDocumentNumberRaw: form.pidNumber }),
@@ -105,9 +94,9 @@ async function saveHealthRecord(memberId, form) {
     ...(form.currentMedications && { currentMedications: form.currentMedications }),
   };
 
-  const res = await fetch(`${BASE_URL}${MEMBER_ENDPOINT}/${memberId}/health`, {
+  const res = await fetchImpl(`${BASE_URL}${MEMBER_ENDPOINT}/${encodeURIComponent(memberId)}/health`, {
     method: 'PUT',
-    headers: authHeaders(),
+    headers: authHeaders(session),
     body: JSON.stringify(payload),
   });
 
@@ -143,7 +132,7 @@ function mapApiError(status, raw) {
     return 'ไม่พบ endpoint ของ backend — กรุณาตรวจสอบ VITE_API_BASE_URL หรือติดต่อผู้ดูแลระบบ';
   }
   if (status === 401 || status === 403) {
-    return 'ไม่มีสิทธิ์เข้าถึง — กรุณาตรวจสอบ VITE_STAFF_TOKEN หรือ VITE_POS_API_KEY';
+    return 'ไม่มีสิทธิ์บันทึกข้อมูล กรุณาติดต่อผู้ดูแล';
   }
   if (status === 400) {
     return `ข้อมูลไม่ถูกต้อง: ${raw}`;

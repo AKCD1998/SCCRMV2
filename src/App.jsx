@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { registerMember } from './api/crmMembers.js';
+import { staffSession } from './api/staffSession.js';
+import StaffSignIn from './StaffSignIn.jsx';
 
 /* ─── Constants ─────────────────────────────────────────────────────────── */
 
@@ -90,6 +92,7 @@ function validateForm(form) {
 /* ─── App ────────────────────────────────────────────────────────────────── */
 
 export default function App() {
+  const [staffName, setSignedInStaffName] = useState('');
   const [form, setForm]               = useState(BLANK_FORM);
   const [errors, setErrors]           = useState({});
   const [submitState, setSubmitState] = useState('idle'); // idle | submitting | success | error
@@ -124,6 +127,7 @@ export default function App() {
       setMemberCode(code);
       setSubmitState('success');
     } catch (err) {
+      if (err.code === 'STAFF_SESSION_REQUIRED') setSignedInStaffName('');
       setApiError(err.message || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ');
       setSubmitState('error');
     }
@@ -139,6 +143,18 @@ export default function App() {
   }
 
   const isSubmitting = submitState === 'submitting';
+
+  if (!staffName) return <StaffSignIn onSignedIn={setSignedInStaffName} />;
+
+  function signOut() {
+    staffSession.clear();
+    setForm(BLANK_FORM);
+    setErrors({});
+    setSubmitState('idle');
+    setApiError('');
+    setMemberCode('');
+    setSignedInStaffName('');
+  }
 
   return (
     <div className="page">
@@ -156,6 +172,7 @@ export default function App() {
 
         {/* ── Form body ── */}
         <div className="form-body">
+          <p>เครื่อง: {staffName} <button type="button" onClick={signOut} disabled={isSubmitting}>ออกจากหน้านี้</button></p>
           <p className="required-note">* หมายถึงข้อมูลที่จำเป็น</p>
 
           <form onSubmit={handleSubmit} noValidate>
